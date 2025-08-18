@@ -1,0 +1,15 @@
+
+playwright>=1.40.0
+loguru>=0.7.0
+pydantic>=2.0.0
+
+# 计算机视觉相关（用于点击验证码识别）
+opencv-python>=4.8.0
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# ddddocr验证码识别
+ddddocr>=1.4.11
+
+# 可选：若快验证码识别服务
+# requests>=2.31.0
