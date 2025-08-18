@@ -21,6 +21,8 @@ class CourseCrawler:
     def __init__(self, use_solver: Optional[str] = None):
         self.use_solver = use_solver
         self.solver = None
+        # 添加动态设置属性
+        self._dynamic_settings = None
         
         if use_solver:
             if use_solver == "ruokuai":
@@ -59,16 +61,29 @@ class CourseCrawler:
                 logger.info("提示：可以使用 --use-solver ocr 选择ddddocr服务")
                 self.solver = None
 
+    @property
+    def settings(self):
+        """返回当前使用的设置，优先使用动态设置"""
+        return self._dynamic_settings if self._dynamic_settings else settings
+
+    def set_user_credentials(self, username: str, password: str):
+        """动态设置用户凭据"""
+        from config import Settings
+        # 创建新的设置对象，复制全局设置但覆盖用户名和密码
+        self._dynamic_settings = Settings()
+        self._dynamic_settings.username = username
+        self._dynamic_settings.password = password
+
     async def _new_context(self, pw) -> BrowserContext:
         args = ["--disable-blink-features=AutomationControlled"]
-        browser = await pw.chromium.launch(headless=settings.headless, args=args)
+        browser = await pw.chromium.launch(headless=self.settings.headless, args=args)
         context = await browser.new_context(
-            user_agent=settings.user_agent,
-            viewport={"width": settings.viewport[0], "height": settings.viewport[1]},
-            locale=settings.locale,
-            timezone_id=settings.timezone_id,
-            color_scheme=settings.color_scheme,
-            proxy={"server": settings.http_proxy} if settings.http_proxy else None,
+            user_agent=self.settings.user_agent,
+            viewport={"width": self.settings.viewport[0], "height": self.settings.viewport[1]},
+            locale=self.settings.locale,
+            timezone_id=self.settings.timezone_id,
+            color_scheme=self.settings.color_scheme,
+            proxy={"server": self.settings.http_proxy} if self.settings.http_proxy else None,
         )
         await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
         return context
@@ -77,9 +92,9 @@ class CourseCrawler:
         page = await context.new_page()
         
         # 设置更长的超时时间
-        page.set_default_timeout(settings.page_load_timeout)
+        page.set_default_timeout(self.settings.page_load_timeout)
         
-        await page.goto(settings.login_url, wait_until="networkidle")
+        await page.goto(self.settings.login_url, wait_until="networkidle")
         
         # 等待页面完全加载
         logger.info("等待页面完全加载...")
@@ -175,8 +190,8 @@ class CourseCrawler:
             raise RuntimeError("登录验证超时")
 
         # 自动化登录
-        await page.fill(login_sel["username"], settings.username)
-        await page.fill(login_sel["password"], settings.password)
+        await page.fill(login_sel["username"], self.settings.username)
+        await page.fill(login_sel["password"], self.settings.password)
 
         # 点击登录按钮（只点一次）
         logger.info("点击登录按钮...")
@@ -571,11 +586,11 @@ class CourseCrawler:
         
         try:
             # 设置更长的超时时间
-            page.set_default_timeout(settings.page_load_timeout)
+            page.set_default_timeout(self.settings.page_load_timeout)
             
             # 直接访问工作台页面，不检查状态
-            logger.info(f"正在访问工作台页面: {settings.workbench_url}")
-            await page.goto(settings.workbench_url, wait_until="networkidle")
+            logger.info(f"正在访问工作台页面: {self.settings.workbench_url}")
+            await page.goto(self.settings.workbench_url, wait_until="networkidle")
             
             # 等待页面完全加载
             logger.info("等待工作台页面完全加载...")
@@ -772,11 +787,17 @@ class CourseCrawler:
             else:
                 logger.warning("页面可能未正确跳转，但继续尝试抓取数据")
             
-            # 现在应该已经在课程页面了，开始抓取数据
-            logger.info("开始抓取课程数据...")
+            # 现在应该已经在个人信息页面了，先抓取组织机构并退出登录
+            logger.info("开始爬取组织机构信息...")
+            org_info = await self._scrape_organization_info(page)
+            if org_info:
+                await self._save_org_info_to_file(org_info)
+                logger.info("✅ 组织机构信息已保存到记事本")
+            logger.info("开始退出登录流程...")
+            await self._logout_user(page)
             
-            csel = SELECTORS["courses"]
-            rows = []
+            # 退出后结束流程
+            return []
 
             while True:
                 # 检查页面是否仍然有效
@@ -844,7 +865,7 @@ class CourseCrawler:
                     if await next_btn.count() == 0 or (not await next_btn.is_enabled()):
                         logger.info("未找到下一页或不可点击，结束"); break
                     await next_btn.click()
-                    await jitter_sleep(settings.request_interval_min_ms, settings.request_interval_max_ms)
+                    await jitter_sleep(self.settings.request_interval_min_ms, self.settings.request_interval_max_ms)
                 except Exception as e:
                     logger.warning(f"翻页时出错: {e}")
                     break
@@ -893,7 +914,7 @@ class CourseCrawler:
             
             # 如果没有找到明确的课程链接，尝试直接构造URL
             logger.info("未找到明确的课程链接，尝试使用基础URL")
-            return settings.courses_base_url
+            return self.settings.courses_base_url
             
         except Exception as e:
             logger.error(f"查找课程链接时出错: {e}")
@@ -939,7 +960,7 @@ class CourseCrawler:
             import os
             if os.path.exists("storage_state.json"):
                 await context.close()
-                browser = await pw.chromium.launch(headless=settings.headless, args=["--disable-blink-features=AutomationControlled"])
+                browser = await pw.chromium.launch(headless=self.settings.headless, args=["--disable-blink-features=AutomationControlled"])
                 context = await browser.new_context(storage_state="storage_state.json")
                 await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
                 logger.info("已加载历史 storage_state.json")
@@ -1155,11 +1176,17 @@ class CourseCrawler:
             else:
                 logger.warning("页面可能未正确跳转，但继续尝试抓取数据")
             
-            # 现在应该已经在课程页面了，开始抓取数据
-            logger.info("开始抓取课程数据...")
+            # 现在应该已经在个人信息页面了，先抓取组织机构并退出登录
+            logger.info("开始爬取组织机构信息...")
+            org_info = await self._scrape_organization_info(page)
+            if org_info:
+                await self._save_org_info_to_file(org_info)
+                logger.info("✅ 组织机构信息已保存到记事本")
+            logger.info("开始退出登录流程...")
+            await self._logout_user(page)
             
-            csel = SELECTORS["courses"]
-            rows = []
+            # 退出后结束流程
+            return []
 
             while True:
                 # 检查页面是否仍然有效
@@ -1227,7 +1254,7 @@ class CourseCrawler:
                     if await next_btn.count() == 0 or (not await next_btn.is_enabled()):
                         logger.info("未找到下一页或不可点击，结束"); break
                     await next_btn.click()
-                    await jitter_sleep(settings.request_interval_min_ms, settings.request_interval_max_ms)
+                    await jitter_sleep(self.settings.request_interval_min_ms, self.settings.request_interval_max_ms)
                 except Exception as e:
                     logger.warning(f"翻页时出错: {e}")
                     break
@@ -1583,3 +1610,139 @@ class CourseCrawler:
         except Exception as e:
             logger.error(f"获取验证码指令失败: {e}")
             return ""
+
+    async def _scrape_organization_info(self, page):
+        """爬取组织机构信息"""
+        try:
+            logger.info("开始爬取组织机构信息...")
+            
+            # 等待页面稳定
+            await asyncio.sleep(2)
+            
+            org_info = {}
+            
+            # 查找用户名 - 用你给的选择器
+            try:
+                username_el = page.locator("p[data-v-2a389681]")
+                if await username_el.count() > 0:
+                    username = await username_el.first.inner_text()
+                    if username and username.strip():
+                        org_info['username'] = username.strip()
+                        logger.info(f"找到用户名: {username.strip()}")
+                    else:
+                        org_info['username'] = self.settings.username
+                        logger.info(f"使用配置文件中的用户名: {self.settings.username}")
+                else:
+                    org_info['username'] = self.settings.username
+                    logger.info(f"未找到用户名元素，使用配置文件中的用户名: {self.settings.username}")
+            except Exception as e:
+                logger.warning(f"获取用户名失败: {e}")
+                org_info['username'] = self.settings.username
+            
+            # 查找组织机构 - 用你给的选择器
+            try:
+                org_el = page.locator("input.el-input__inner[placeholder='请选择组织机构']")
+                if await org_el.count() > 0:
+                    # 直接读取输入框值
+                    try:
+                        org_value = await org_el.input_value()
+                    except Exception:
+                        org_value = await org_el.get_attribute("value")
+                    if org_value and org_value.strip():
+                        org_info['organization'] = org_value.strip()
+                        logger.info(f"找到组织机构: {org_value.strip()}")
+                    else:
+                        org_info['organization'] = "心理健康服务平台"
+                        logger.info("组织机构字段为空，使用默认值")
+                else:
+                    org_info['organization'] = "心理健康服务平台"
+                    logger.info("未找到组织机构元素，使用默认值")
+            except Exception as e:
+                logger.warning(f"获取组织机构失败: {e}")
+                org_info['organization'] = "心理健康服务平台"
+            
+            logger.info(f"爬取到的组织机构信息: {org_info}")
+            return org_info
+            
+        except Exception as e:
+            logger.error(f"爬取组织机构信息失败: {e}")
+            return None
+
+    async def _save_org_info_to_file(self, org_info):
+        """按"用户名 组织机构"单行格式追加到 org_info.txt"""
+        try:
+            line = f"{org_info.get('username', '未知')} {org_info.get('organization', '未知')}\n"
+            with open("org_info.txt", 'a', encoding='utf-8') as f:
+                f.write(line)
+            logger.info("已写入 org_info.txt 一行记录")
+            return "org_info.txt"
+        except Exception as e:
+            logger.error(f"保存组织机构信息到文件失败: {e}")
+            return None
+
+    async def _logout_user(self, page):
+        """退出登录"""
+        try:
+            logger.info("开始退出登录流程...")
+            
+            # 等待页面稳定
+            await asyncio.sleep(2)
+            
+            # 查找右上角用户菜单 - 用你给的选择器
+            user_menu_selector = "span.el-dropdown-link.el-dropdown-selfdefine"
+            try:
+                user_menu_element = page.locator(user_menu_selector)
+                if await user_menu_element.count() == 0:
+                    logger.error("未找到用户菜单元素")
+                    return False
+                
+                logger.info("找到用户菜单元素，准备点击...")
+                await user_menu_element.first.click()
+                
+                # 等待下拉菜单展开
+                logger.info("等待下拉菜单展开...")
+                await asyncio.sleep(3)
+                
+                # 查找"退出系统"菜单项
+                logout_selector = "li:has-text('退出系统')"
+                try:
+                    logout_element = page.locator(logout_selector)
+                    if await logout_element.count() > 0:
+                        logger.info("找到退出系统菜单项，准备点击...")
+                        await logout_element.first.click()
+                        
+                        # 等待确认弹窗出现并点击"确定"按钮
+                        try:
+                            confirm_btn = page.locator("button.el-button.el-button--default.el-button--small.el-button--primary")
+                            if await confirm_btn.count() > 0:
+                                await confirm_btn.first.click()
+                                logger.info("已点击确认退出按钮")
+                            else:
+                                logger.warning("未找到确认退出按钮")
+                        except Exception as e:
+                            logger.warning(f"点击确认退出按钮失败: {e}")
+
+                        # 等待跳回登录页
+                        for _ in range(10):
+                            await asyncio.sleep(1)
+                            current_url = page.url
+                            if "/login" in current_url:
+                                logger.info("✅ 退出登录成功！")
+                                return True
+                        logger.warning(f"可能退出登录失败，当前URL: {current_url}")
+                        return False
+                    else:
+                        logger.error("未找到退出系统菜单项")
+                        return False
+                        
+                except Exception as e:
+                    logger.error(f"点击退出系统菜单项失败: {e}")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"点击用户菜单失败: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"退出登录过程中出错: {e}")
+            return False
