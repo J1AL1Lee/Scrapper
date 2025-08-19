@@ -71,8 +71,17 @@ class CourseCrawler:
         from config import Settings
         # 创建新的设置对象，复制全局设置但覆盖用户名和密码
         self._dynamic_settings = Settings()
+        # 复制所有全局设置
+        for attr in dir(settings):
+            if not attr.startswith('_') and hasattr(settings, attr):
+                try:
+                    setattr(self._dynamic_settings, attr, getattr(settings, attr))
+                except:
+                    pass
+        # 覆盖用户名和密码
         self._dynamic_settings.username = username
         self._dynamic_settings.password = password
+        logger.info(f"已设置动态用户凭据: {username}")
 
     async def _new_context(self, pw) -> BrowserContext:
         args = ["--disable-blink-features=AutomationControlled"]
@@ -1662,7 +1671,33 @@ class CourseCrawler:
                 org_info['organization'] = "心理健康服务平台"
             
             logger.info(f"爬取到的组织机构信息: {org_info}")
+
+            
+             # 查找校园id - 用你给的选择器
+            try:
+                id_el = page.locator("input.el-input__inner[placeholder='请输入身份证号码']")
+                if await id_el.count() > 0:
+                    # 直接读取输入框值
+                    try:
+                        id_value = await id_el.input_value()
+                    except Exception:
+                        id_value = await id_el.get_attribute("value")
+                    if id_value and id_value.strip():
+                        org_info['studentid'] = id_value.strip()
+                        logger.info(f"找到学生id: {id_value.strip()}")
+                    else:
+                        org_info['studentid'] = "未填写"
+                        logger.info("学生id字段为空，使用默认值")
+                else:
+                    org_info['studentid'] = "未填写"
+                    logger.info("未找到组织机构元素，使用默认值")
+            except Exception as e:
+                logger.warning(f"获取学生id失败: {e}")
+                org_info['studentid'] = "未填写"
+            
+            logger.info(f"爬取到的组织机构信息: {org_info}")
             return org_info
+
             
         except Exception as e:
             logger.error(f"爬取组织机构信息失败: {e}")
@@ -1671,7 +1706,7 @@ class CourseCrawler:
     async def _save_org_info_to_file(self, org_info):
         """按"用户名 组织机构"单行格式追加到 org_info.txt"""
         try:
-            line = f"{org_info.get('username', '未知')} {org_info.get('organization', '未知')}\n"
+            line = f"{org_info.get('username', '未知')} {self.settings.username} {org_info.get('organization', '未知')} {org_info.get('studentid', '未知')}\n"
             with open("org_info.txt", 'a', encoding='utf-8') as f:
                 f.write(line)
             logger.info("已写入 org_info.txt 一行记录")
